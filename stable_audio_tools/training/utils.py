@@ -58,6 +58,7 @@ class InverseLR(torch.optim.lr_scheduler._LRScheduler):
                 for base_lr in self.base_lrs]
 
 def create_optimizer_from_config(optimizer_config, parameters):
+    parameters = list(parameters)  # <--- FIX CRITICO
     """Create optimizer from config.
 
     Args:

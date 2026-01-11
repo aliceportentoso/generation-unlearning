@@ -112,7 +112,7 @@ class ListConditioner(Conditioner):
         return [int_embeds, torch.ones(int_embeds.shape[0], 1).to(device)]
 
 def clap_load_state_dict(clap_ckpt_path, clap_model):
-    state_dict = torch.load(clap_ckpt_path, map_location="cpu", weights_only=False)["state_dict"]
+    state_dict = torch.load(clap_ckpt_path, map_location="cpu", weights_only=False) #["state_dict"]
 
     # Remove "module." from state dict keys
     state_dict = {k[7:]: v for k, v in state_dict.items()}
@@ -644,11 +644,11 @@ class MultiConditioner(nn.Module):
         conditioners: a dictionary of conditioners with keys corresponding to the keys of the conditioning input dictionary (e.g. "prompt")
         default_keys: a dictionary of default keys to use if the key is not in the input dictionary (e.g. {"prompt_t5": "prompt"})
     """
-    def __init__(self, conditioners: tp.Dict[str, Conditioner], default_keys: tp.Dict[str, str] = {}, pre_encoded_keys: tp.List[str] = []):
+    def __init__(self, conditioners: tp.Dict[str, Conditioner], default_keys, pre_encoded_keys: tp.List[str] = []):
         super().__init__()
 
         self.conditioners = nn.ModuleDict(conditioners)
-        self.default_keys = default_keys
+        self.default_keys = {"prompt_t5": "prompt"}
         self.pre_encoded_keys = pre_encoded_keys
 
     def forward(self, batch_metadata: tp.List[tp.Dict[str, tp.Any]], device: tp.Union[torch.device, str]) -> tp.Dict[str, tp.Any]:

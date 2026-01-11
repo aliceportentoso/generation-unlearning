@@ -1,6 +1,6 @@
 import typing as tp
 
-import audiotools
+#import audiotools
 import torch
 import torchaudio
 
@@ -138,8 +138,9 @@ class MelSpectrogramLoss(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        x = audiotools.AudioSignal(x, self.sample_rate)
-        y = audiotools.AudioSignal(y, self.sample_rate)
+        resampler = torchaudio.transforms.Resample(orig_freq=self.sample_rate, new_freq=16000)
+        x = resampler(x)
+        y = resampler(y)
 
         loss = 0.0
         for n_mels, fmin, fmax, params in zip(

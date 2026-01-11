@@ -406,9 +406,9 @@ class Attention(nn.Module):
     def apply_attn(self, q, k, v, causal = None, flex_attention_block_mask = None, flex_attention_score_mod = None, flash_attn_sliding_window = None):
 
         if self.num_heads != self.kv_heads:
-             # Repeat interleave kv_heads to match q_heads for grouped query attention
-             heads_per_kv_head = self.num_heads // self.kv_heads
-             k, v = map(lambda t: t.repeat_interleave(heads_per_kv_head, dim = 1), (k, v))
+            heads_per_kv_head = -(-self.num_heads // self.kv_heads)
+            k = k.repeat_interleave(heads_per_kv_head, dim=1)[:, :self.num_heads, :, :]
+            v = v.repeat_interleave(heads_per_kv_head, dim=1)[:, :self.num_heads, :, :]
 
         flash_attn_available = flash_attn_func is not None
         if flash_attn_sliding_window is not None and (not flash_attn_available):
@@ -437,6 +437,18 @@ class Attention(nn.Module):
             
             out = rearrange(out.to(fa_dtype_in), 'b n h d -> b h n d')
         else:
+
+            seq_len_q = q.shape[2]
+            seq_len_kv = k.shape[2]
+
+            if seq_len_q > seq_len_kv:
+                pad_len = seq_len_q - seq_len_kv
+                k = F.pad(k, (0, 0, 0, pad_len))  # pad dimension 2 (seq_len)
+                v = F.pad(v, (0, 0, 0, pad_len))
+            elif seq_len_kv > seq_len_q:
+                pad_len = seq_len_kv - seq_len_q
+                q = F.pad(q, (0, 0, 0, pad_len))
+
             out = F.scaled_dot_product_attention(q, k, v, is_causal = causal)
         return out
 

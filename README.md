@@ -24,7 +24,7 @@ A basic Gradio interface is provided to test out trained models.
 
 For example, to create an interface for the [`stable-audio-open-1.0`](https://huggingface.co/stabilityai/stable-audio-open-1.0) model, once you've accepted the terms for the model on Hugging Face, you can run:
 ```bash
-$ python3 ./run_gradio.py --pretrained-name stabilityai/stable-audio-open-1.0
+$ python3 ./run_gradio.py --pretrained-name stabilityai/stable-audio-open-1.0.json
 ```
 
 The `run_gradio.py` script accepts the following command line arguments:

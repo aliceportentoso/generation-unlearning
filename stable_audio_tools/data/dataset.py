@@ -136,8 +136,8 @@ class LocalDatasetConfig:
         self,
         id: str,
         path: str,
-        custom_metadata_fn: Optional[Callable[[str], str]] = None
-    ):
+        custom_metadata_fn: Optional[Callable[[dict], dict]] = None
+   ):
         self.id = id
         self.path = path
         self.custom_metadata_fn = custom_metadata_fn

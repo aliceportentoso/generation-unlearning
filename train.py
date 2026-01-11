@@ -24,7 +24,28 @@ class ModelConfigEmbedderCallback(pl.Callback):
 def main():
     torch.multiprocessing.set_sharing_strategy('file_system')
     args = get_all_args()
-    seed = args.seed
+
+    # Override manuale dei parametri
+    args.logger = "wandb"
+    args.num_gpus = 1
+    args.num_nodes = 1
+    args.precision = 16
+
+    args.checkpoint_every = 5000
+    args.strategy = "auto"
+    args.gradient_clip_val = 1.0
+    args.ckpt_path = None
+    args.val_dataset_config = None
+    args.val_every = 0
+
+    args.batch_size = 4
+    args.accum_batches = 4
+    args.num_workers= 2
+    seed = 42
+
+    args.pretrained_ckpt_path = None
+    args.remove_pretransform_weight_norm = None
+    args.pretransform_ckpt_path = None
 
     # Set a different seed for each process if using SLURM
     if os.environ.get("SLURM_PROCID") is not None:
@@ -32,11 +53,15 @@ def main():
 
     pl.seed_everything(seed, workers=True)
 
-    #Get JSON config from args.model_config
-    with open(args.model_config) as f:
+    # Specifica direttamente i path dei file di configurazione
+    model_config_path = "stable_audio_tools/configs/model.json"
+    dataset_config_path = "stable_audio_tools/configs/dataset.json"
+
+    # Carica i JSON
+    with open(model_config_path, "r") as f:
         model_config = json.load(f)
 
-    with open(args.dataset_config) as f:
+    with open(dataset_config_path, "r") as f:
         dataset_config = json.load(f)
 
     train_dl = create_dataloader_from_config(
@@ -66,6 +91,11 @@ def main():
         )
 
     model = create_model_from_config(model_config)
+    state = load_ckpt_state_dict("stable-audio-open-1.0.ckpt")
+    copy_state_dict(model, state)  # carica solo i pesi del modello
+
+    #pretrained_model, processor = get_pretrained_model("stabilityai/stable-audio-open-1.0")
+    #copy_state_dict(model, pretrained_model.state_dict())  # # Inizializza il modello con i pesi pre-addestrati
 
     if args.pretrained_ckpt_path:
         copy_state_dict(model, load_ckpt_state_dict(args.pretrained_ckpt_path))
@@ -162,6 +192,8 @@ def main():
         num_sanity_val_steps=0, # If you need to debug validation, change this line
         **val_args      
     )
+
+    #args.ckpt_path = "stable_audio_tools/yl5co4oo/checkpoints/epoch=34-step=40000.ckpt"
 
     trainer.fit(training_wrapper, train_dl, val_dl, ckpt_path=args.ckpt_path if args.ckpt_path else None)
 

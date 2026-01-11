@@ -171,19 +171,36 @@ def main(args):
     trainer.validate(pl_module, data_loader)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Encode audio dataset to VAE latents using PyTorch Lightning')
-    parser.add_argument('--model-config', type=str, help='Path to model config', required=False)
-    parser.add_argument('--ckpt-path', type=str, help='Path to unwrapped autoencoder model checkpoint', required=False)
-    parser.add_argument('--model-half', action='store_true', help='Whether to use half precision')
-    parser.add_argument('--dataset-config', type=str, help='Path to dataset config file', required=True)
-    parser.add_argument('--output-path', type=str, help='Path to output folder', required=True)
-    parser.add_argument('--batch-size', type=int, help='Batch size', default=1)
-    parser.add_argument('--sample-size', type=int, help='Number of audio samples to pad/crop to', default=1320960)
-    parser.add_argument('--is-discrete', action='store_true', help='Whether the model is discrete')
-    parser.add_argument('--num-nodes', type=int, help='Number of GPU nodes', default=1)
-    parser.add_argument('--num-workers', type=int, help='Number of dataloader workers', default=4)
-    parser.add_argument('--strategy', type=str, help='PyTorch Lightning strategy', default='auto')
-    parser.add_argument('--limit-batches', type=int, help='Limit number of batches (optional)', default=None)
-    parser.add_argument('--shuffle', action='store_true', help='Shuffle dataset')
-    args = parser.parse_args()
+    args = argparse.Namespace(
+        model_config="stable_audio_tools/configs/model.json",
+        ckpt_path="stable_audio_tools/uluqpqvf/checkpoints/UNWRAPPED_epoch=0-step=30000.safetensor",
+        model_half=True,
+        dataset_config="stable_audio_tools/configs/dataset.json",
+        output_path="outputs/latents",
+        batch_size=2,
+        sample_size=1323000,
+        is_discrete=False,
+        num_nodes=1,
+        num_workers=4,
+        strategy="auto",
+        limit_batches=None,
+        shuffle=False
+    )
+
+
+    # parser = argparse.ArgumentParser(description='Encode audio dataset to VAE latents using PyTorch Lightning')
+    # parser.add_argument('--model-config', type=str, help='Path to model config', required=False)
+    # parser.add_argument('--ckpt-path', type=str, help='Path to unwrapped autoencoder model checkpoint', required=False)
+    # parser.add_argument('--model-half', action='store_true', help='Whether to use half precision')
+    # parser.add_argument('--dataset-config', type=str, help='Path to dataset config file', required=True)
+    # parser.add_argument('--output-path', type=str, help='Path to output folder', required=True)
+    # parser.add_argument('--batch-size', type=int, help='Batch size', default=1)
+    # parser.add_argument('--sample-size', type=int, help='Number of audio samples to pad/crop to', default=1320960)
+    # parser.add_argument('--is-discrete', action='store_true', help='Whether the model is discrete')
+    # parser.add_argument('--num-nodes', type=int, help='Number of GPU nodes', default=1)
+    # parser.add_argument('--num-workers', type=int, help='Number of dataloader workers', default=4)
+    # parser.add_argument('--strategy', type=str, help='PyTorch Lightning strategy', default='auto')
+    # parser.add_argument('--limit-batches', type=int, help='Limit number of batches (optional)', default=None)
+    # parser.add_argument('--shuffle', action='store_true', help='Shuffle dataset')
+    # args = parser.parse_args()
     main(args)

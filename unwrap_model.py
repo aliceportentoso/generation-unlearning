@@ -4,13 +4,20 @@ from torch.nn.parameter import Parameter
 from stable_audio_tools.models import create_model_from_config
 
 if __name__ == '__main__':
-    args = argparse.ArgumentParser()
-    args.add_argument('--model-config', type=str, default=None)
-    args.add_argument('--ckpt-path', type=str, default=None)
-    args.add_argument('--name', type=str, default='exported_model')
-    args.add_argument('--use-safetensors', action='store_true')
 
-    args = args.parse_args()
+    args = argparse.Namespace(
+        model_config = "stable_audio_tools/configs/model.json",
+        ckpt_path = "stable_audio_tools/yzxnx12q/checkpoints/epoch=0-step=10000.ckpt",
+        name = "stable_audio_tools/yzxnx12q/checkpoints/UNWRAPPED_epoch=0-step=10000.ckpt",
+        use_safetensors = True
+    )
+
+    # args = argparse.ArgumentParser()
+    # args.add_argument('--model-config', type=str, default=None)
+    # args.add_argument('--ckpt-path', type=str, default=None)
+    # args.add_argument('--name', type=str, default='exported_model')
+    # args.add_argument('--use-safetensors', action='store_true')
+
 
     with open(args.model_config) as f:
         model_config = json.load(f)
