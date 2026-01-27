@@ -87,7 +87,6 @@ def generate_diffusion_uncond(
     # Return audio
     return sampled
 
-
 def generate_diffusion_cond(
         model,
         steps: int = 250,
