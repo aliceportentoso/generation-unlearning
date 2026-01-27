@@ -1,0 +1,13 @@
+{
+  "dataset_type": "latent_dir",
+  "datasets": [
+    {
+      "id": "fma",
+      "path": "../data/fma_latents/",
+      "metadata_path": "../data/fma_latents/metadata.json"
+    }
+  ],
+  "random_crop": true,
+  "sample_rate": 44100,
+  "channels": 2
+}

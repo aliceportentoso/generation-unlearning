@@ -1,0 +1,128 @@
+{
+  "model_type": "diffusion_cond",
+  "sample_size": 1323000,
+  "sample_rate": 44100,
+  "audio_channels": 2,
+
+  "model": {
+    "pretransform": {
+      "type": "autoencoder",
+      "iterate_batch": true,
+      "config": {
+        "encoder": {
+          "type": "dac",
+          "config": {
+            "in_channels": 2,
+            "latent_dim": 128,
+            "d_model": 128,
+            "strides": [4, 4, 8, 8]
+          }
+        },
+        "decoder": {
+          "type": "dac",
+          "config": {
+            "out_channels": 2,
+            "latent_dim": 64,
+            "channels": 1536,
+            "rates": [8, 8, 4, 4]
+          }
+        },
+        "bottleneck": {
+          "type": "vae"
+        },
+        "latent_dim": 64,
+        "downsampling_ratio": 1024,
+        "io_channels": 2
+      }
+    },
+
+    "conditioning": {
+      "configs": [
+        {
+          "id": "prompt",
+          "type": "clap_text",
+          "config": {
+            "audio_model_type": "HTSAT-base",
+            "enable_fusion": true,
+            "clap_ckpt_path": "/path/to/clap.ckpt",
+            "use_text_features": true,
+            "feature_layer_ix": -2
+          }
+        },
+        {
+          "id": "seconds_start",
+          "type": "number",
+          "config": {
+            "min_val": 0,
+            "max_val": 512
+          }
+        },
+        {
+          "id": "seconds_total",
+          "type": "number",
+          "config": {
+            "min_val": 0,
+            "max_val": 512
+          }
+        }
+      ],
+      "cond_dim": 768
+    },
+
+    "diffusion": {
+      "type": "dit",
+      "cross_attention_cond_ids": ["prompt", "seconds_start", "seconds_total"],
+      "global_cond_ids": ["seconds_start", "seconds_total"],
+      "config": {
+        "io_channels": 64,
+        "embed_dim": 1152,
+        "depth": 28,
+        "num_heads": 16,
+        "cond_token_dim": 768,
+        "global_cond_dim": 1536,
+        "project_cond_tokens": false,
+        "transformer_type": "continuous_transformer"
+      }
+    },
+
+    "io_channels": 64
+  },
+
+  "training": {
+    "use_ema": false,
+    "log_loss_info": false,
+    "optimizer_configs": {
+      "diffusion": {
+        "optimizer": {
+          "type": "AdamW",
+          "config": {
+            "lr": 5e-4,
+            "betas": [0.9, 0.999],
+            "weight_decay": 1e-3
+          }
+        },
+        "scheduler": {
+          "type": "InverseLR",
+          "config": {
+            "inv_gamma": 1000000,
+            "power": 0.5,
+            "warmup": 0.01
+          }
+        }
+      }
+    },
+
+    "demo": {
+      "demo_every": 2000,
+      "demo_steps": 250,
+      "num_demos": 4,
+      "demo_cond": [
+        {"prompt": "rock music", "seconds_start": 0, "seconds_total": 30},
+        {"prompt": "classical piano music", "seconds_start": 0, "seconds_total": 30},
+        {"prompt": "80s glam rock song with driving drums and distorted guitars", "seconds_start": 0, "seconds_total": 30},
+        {"prompt": "A grand orchestral arrangement with thunderous percussion and soaring strings for a heroic battle.", "seconds_start": 0, "seconds_total": 190}
+      ],
+      "demo_cfg_scales": [3, 6, 9]
+    }
+  }
+}
