@@ -6,7 +6,7 @@ from .utils import load_ckpt_state_dict
 from huggingface_hub import hf_hub_download
 
 def get_pretrained_model(name: str):
-    
+    name = ""
     model_config_path = hf_hub_download(name, filename="model_config.json", repo_type='model') #, token="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")
 
     with open(model_config_path) as f:
