@@ -134,8 +134,7 @@ def generate_diffusion_cond(
         
     # Seed
     # The user can explicitly set the seed to deterministically generate the same output. Otherwise, use a random seed.
-    seed = seed if seed != -1 else np.random.randint(0, 2**32 - 1)
-    print(f'seed: {seed}')
+
     torch.manual_seed(seed)
     # Define the initial noise immediately after setting the seed
     noise = torch.randn([batch_size, model.io_channels, sample_size], device=device)

@@ -1,3 +1,4 @@
+from diffusers import AutoencoderOobleck
 from torch import optim
 
 import torchaudio
@@ -25,12 +26,36 @@ def unl_fine_tuning(model, forget_loader, retain_loader, model_config, epochs=1,
 
     model.train()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    latent_scale = 0.18215
-
+    # 1️⃣ Carica il checkpoint con i pesi del VAE
     ckpt_path = "vae_model.ckpt"
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    autoencoder = create_autoencoder_from_config(ckpt['config'])
+
+    # 2️⃣ Config del tuo VAE (dal JSON)
+    vae_config = {
+        "audio_channels": 2,
+        "channel_multiples": [1, 2, 4, 8, 16],
+        "decoder_channels": 128,
+        "decoder_input_channels": 64,
+        "downsampling_ratios": [2, 4, 4, 8, 8],
+        "encoder_hidden_size": 128,
+        "sampling_rate": 44100
+    }
+
+    # 3️⃣ Crea direttamente l'autoencoder (senza create_autoencoder_from_config)
+    autoencoder = AutoencoderOobleck(
+        audio_channels=vae_config["audio_channels"],
+        channel_multiples=vae_config["channel_multiples"],
+        decoder_channels=vae_config["decoder_channels"],
+        decoder_input_channels=vae_config["decoder_input_channels"],
+        downsampling_ratios=vae_config["downsampling_ratios"],
+        encoder_hidden_size=vae_config["encoder_hidden_size"],
+        sampling_rate=vae_config["sampling_rate"]
+    )
+
+    # 4️⃣ Carica i pesi
+    autoencoder.load_state_dict(ckpt['state_dict'], strict=False)
+
+    # 5️⃣ Modalità eval e invio a device
     autoencoder.eval().to(device)
 
     for epoch in range(epochs):
@@ -69,13 +94,15 @@ def unl_fine_tuning(model, forget_loader, retain_loader, model_config, epochs=1,
             #encoding
             with torch.no_grad():
                 posterior = autoencoder.encode(waveforms)
-                latents = posterior.sample()
-                latents = latents * latent_scale
+
+                latent_dist = posterior.latent_dist
+                latents_mean = latent_dist.mean
+                latents = latents_mean * 0.18215 #latent scale
 
             #timestamp
             t = torch.rand(batch_size, device=device)
 
-            loss = model(latents, t=t, cond=cond)
+            loss = model(latents, t=t, cond=cond).mean()
 
             (-loss).backward()
             optimizer.step()

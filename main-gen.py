@@ -1,4 +1,5 @@
 import os
+import numpy
 import pandas
 import torch
 import torchaudio
@@ -14,7 +15,7 @@ from stable_audio_tools.inference.generation import generate_diffusion_cond
 
 def create_forget_set(df, n_samples=2):
     # 1. Estrazione casuale del forget set
-    forget_set = df.sample(n=n_samples, random_state=42)
+    forget_set = df.sample(n=n_samples, random_state=seed)
 
     # 2. Creazione del retain set escludendo gli indici selezionati
     retain_set = df.drop(forget_set.index)
@@ -22,12 +23,13 @@ def create_forget_set(df, n_samples=2):
     # Restituiamo i DataFrame completi, così hai accesso a tutti i campi
     return forget_set, retain_set
 
-def create_forget_set_by_artist(df, n_artists=2):
+def create_forget_set_by_artist(df, n_artists):
     unique_artists = df[('artist', 'name')].unique()
-    artists_to_forget = pandas.Series(unique_artists).sample(n=n_artists, random_state=42).values
+    artists_to_forget = pandas.Series(unique_artists).sample(n=n_artists, random_state=seed).values
 
     forget_mask = df[('artist', 'name')].isin(artists_to_forget)
     forget_set = df[forget_mask]
+    print(f"Dim forget: {len(forget_set)}")
     retain_set = df[~forget_mask]
 
     return forget_set, retain_set, artists_to_forget
@@ -67,7 +69,8 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage="pre", 
                 cfg_scale=7.0,
                 conditioning=conditioning,
                 sample_size=model_config["sample_size"],
-                device=device
+                device=device,
+                seed=seed
             )
 
         # Trasformazione in formato salvabile
@@ -82,13 +85,14 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage="pre", 
 if __name__ == "__main__":
     start_time_total = time.time()
     run_timestamp = time.strftime("%Y%m%d-%H%M")
+    seed = numpy.random.randint(0, 2 ** 32 - 1)
 
     # 1. Caricamento Dati
     tracks = pandas.read_csv(Config.CSV_FILE, index_col=0, header=[0, 1])
     track_infos = tracks[[('track', 'genre_top'), ('artist', 'name')]].dropna()
 
     # 2. Split Forget/Retain
-    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=2)
+    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=4)
     print(f"Artisti da dimenticare: {chosen_artists}")
 
     # 3. Caricamento Modello
@@ -99,7 +103,7 @@ if __name__ == "__main__":
 
     # 4. GENERAZIONE PRE-UNLEARNING
     # Usiamo il dataframe per generare basandoci sui metadati reali
-    #generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=run_timestamp)
+    generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=run_timestamp)
 
     # 5. PREPARAZIONE DATALOADERS PER UNLEARNING
     # Usiamo la classe FMADataset definita precedentemente che carica l'audio reale

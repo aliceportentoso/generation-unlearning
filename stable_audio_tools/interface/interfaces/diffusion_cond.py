@@ -87,10 +87,7 @@ def generate_cond(
     #Get the device from the model
     device = next(model.parameters()).device
 
-    seed = int(seed)
-    # if seed is -1, define the seed value now, randomly, so we can save it in the filename
-    if(seed==-1):
-        seed = np.random.randint(0, 2**32 - 1, dtype=np.uint32)
+
     
     input_sample_size = sample_size
 
