@@ -6,14 +6,16 @@ import torchaudio
 from torch.utils.data import DataLoader
 
 from dataset import FMADataset
-from unlearning.unlearning import unl_fine_tuning
+from stable_audio_tools.models.diffusion import ConditionedDiffusionModelWrapper
+from unlearning.unlearning import unl_fine_tuning, unl_fine_tuning_gradient_ascent, unl_stochastic_teacher, \
+    unl_one_shot_magnitude, unl_amnesiac
 import time
 
 from stable_audio_tools import get_pretrained_model
 from config import Config
 from stable_audio_tools.inference.generation import generate_diffusion_cond
 
-def create_forget_set(df, n_samples=2):
+def create_forget_set(df, n_samples):
     # 1. Estrazione casuale del forget set
     forget_set = df.sample(n=n_samples, random_state=seed)
 
@@ -43,7 +45,7 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage="pre", 
     test_df = forget_df.drop_duplicates(subset=[('artist', 'name')])
 
     # Cartella di output pulita
-    output_dir = f"audio_out/tx2m/{run_id}"
+    output_dir = f"audio_out/tx2m/{run_id}_{Config.UNL_METHOD}"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"--- Generazione {stage.upper()}: {len(test_df)} ---")
@@ -62,9 +64,17 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage="pre", 
             "seconds_total": 30
         }]
 
+        model.to(device)
+        if "PeftModel" in str(type(model)):
+            mod = model.model
+        elif not isinstance(model, ConditionedDiffusionModelWrapper):
+            mod = model.model
+        else:
+            mod = model
+
         with torch.no_grad():
             audio = generate_diffusion_cond(
-                model,
+                model = mod,
                 steps=50,
                 cfg_scale=7.0,
                 conditioning=conditioning,
@@ -76,7 +86,7 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage="pre", 
         # Trasformazione in formato salvabile
         audio_tensor = audio.detach().cpu().squeeze(0)  # [canali, campioni]
 
-        filename = f"sample_{i}_{artist.replace(' ', '_')}_{stage}.wav"
+        filename = f'sample_{i}_{artist.replace(" ", "_").replace("/","_")}_{stage}.wav'
         filepath = os.path.join(output_dir, filename)
 
         torchaudio.save(filepath, audio_tensor, sample_rate)
@@ -92,14 +102,15 @@ if __name__ == "__main__":
     track_infos = tracks[[('track', 'genre_top'), ('artist', 'name')]].dropna()
 
     # 2. Split Forget/Retain
-    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=4)
+    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=Config.NUM_ARTISTS)
     print(f"Artisti da dimenticare: {chosen_artists}")
 
     # 3. Caricamento Modello
     model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
-
     model.to(Config.DEVICE)
 
+    ####torch.cuda.empty_cache()
+    ####gc.collect()
 
     # 4. GENERAZIONE PRE-UNLEARNING
     # Usiamo il dataframe per generare basandoci sui metadati reali
@@ -116,11 +127,22 @@ if __name__ == "__main__":
 
     # 6. UNLEARNING
     # Ora passiamo i loader, non i dataframe
-    print("Inizio Unlearning...")
-    unl_fine_tuning(model, forget_loader, retain_loader, model_config)
+    print(f"Inizio Unlearning con metodo {Config.UNL_METHOD}...")
+
+    if Config.UNL_METHOD == "GA":
+        unl_model = unl_fine_tuning_gradient_ascent(model, forget_loader, retain_loader, model_config, epochs=Config.EPOCHS, lr=Config.LR)
+    elif Config.UNL_METHOD == "ST":
+        unl_model = unl_stochastic_teacher(model, forget_loader, epochs=Config.EPOCHS, lr=Config.LR/2)
+    elif Config.UNL_METHOD == "OSM":
+        unl_model = unl_one_shot_magnitude(model, threshold=0.1)
+    elif Config.UNL_METHOD == "A":
+        unl_model = unl_amnesiac(model, forget_loader, lr=Config.LR)
+    else:
+        print("unknown method")
+
 
     # 7. GENERAZIONE POST-UNLEARNING
-    generate_samples_from_metadata(model, model_config, forget_df, stage="post", run_id=run_timestamp)
+    generate_samples_from_metadata(unl_model.base_model, model_config, forget_df, stage="post", run_id=run_timestamp)
 
     duration = time.time() - start_time_total
     print(f"Esecuzione completata in: {duration / 60:.2f} minuti")
