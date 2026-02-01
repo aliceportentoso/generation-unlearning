@@ -1,19 +1,19 @@
-import numpy
+import os
 import pandas
 import torch
+import torchaudio
+from torch.utils.data import DataLoader
+
+from dataset import FMADataset
+from unlearning.unlearning import unl_fine_tuning
+import time
 
 from stable_audio_tools import get_pretrained_model
 from config import Config
-import joblib
-
 from stable_audio_tools.inference.generation import generate_diffusion_cond
-from stable_audio_tools.inference.inference import save_audio
 
-balance = False
-
-def create_forget_set(df, n_samples=500):
+def create_forget_set(df, n_samples=2):
     # 1. Estrazione casuale del forget set
-    # .sample() è più sicuro di np.random.choice per i DataFrame
     forget_set = df.sample(n=n_samples, random_state=42)
 
     # 2. Creazione del retain set escludendo gli indici selezionati
@@ -22,64 +22,101 @@ def create_forget_set(df, n_samples=500):
     # Restituiamo i DataFrame completi, così hai accesso a tutti i campi
     return forget_set, retain_set
 
-def generate_samples_from_metadata(model, model_config, forget_artists, stage="pre"):
-    """
-    forget_artists: lista di stringhe (prompt) associate ai 500 brani
-    """
+def create_forget_set_by_artist(df, n_artists=2):
+    unique_artists = df[('artist', 'name')].unique()
+    artists_to_forget = pandas.Series(unique_artists).sample(n=n_artists, random_state=42).values
+
+    forget_mask = df[('artist', 'name')].isin(artists_to_forget)
+    forget_set = df[forget_mask]
+    retain_set = df[~forget_mask]
+
+    return forget_set, retain_set, artists_to_forget
+
+
+def generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=""):
     model.eval()
-    device = next(model.parameters()).device
+    device = Config.DEVICE
     sample_rate = model_config["sample_rate"]
-    sample_size = model_config["sample_size"]
 
-    print(f"Generazione in corso: {stage} unlearning...")
+    test_df = forget_df.drop_duplicates(subset=[('artist', 'name')])
 
-    for i, artist in enumerate(forget_artists):
-        # 1. Creiamo la lista di condizionamento (obbligatoria)
-        # Stable Audio Open si aspetta spesso prompt e parametri come secondi di audio
-        prompt = f"generate a song in the style of {artist}"
+    # Cartella di output pulita
+    output_dir = f"audio_out/tx2m/{run_id}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"--- Generazione {stage.upper()}: {len(test_df)} ---")
+
+    # Cicliamo sulle righe del dataframe per avere prompt specifici
+    for i, (idx, row) in enumerate(test_df.iterrows()):
+        artist = row[('artist', 'name')]
+        genre = row[('track', 'genre_top')]
+
+        # Prompt specifico per testare l'unlearning
+        prompt = f"{genre} song in the style of {artist}"
+
         conditioning = [{
             "prompt": prompt,
             "seconds_start": 0,
-            "seconds_total": 30  # o la durata prevista nel tuo config
+            "seconds_total": 30
         }]
 
-        # 2. Chiamata corretta
-        # Passiamo 'conditioning' esplicitamente come previsto dalla libreria
-        audio = generate_diffusion_cond(
-            model,
-            steps=50,
-            cfg_scale=7.0,
-            conditioning=conditioning,  # <--- CORREZIONE: Usa conditioning invece di conditioning_config
-            sample_size=sample_size,
-            device=device
-        )
-        audio = audio.detach().cpu().squeeze(0)
+        with torch.no_grad():
+            audio = generate_diffusion_cond(
+                model,
+                steps=50,
+                cfg_scale=7.0,
+                conditioning=conditioning,
+                sample_size=model_config["sample_size"],
+                device=device
+            )
 
-        # Salva o accumula l'audio
-        save_audio(f"audio_out/prompt/{stage}/sample_{i}_{artist}.wav", audio, sample_rate)
-        print(f"audio file saved in audio_out/prompt/{stage}/sample_{i}_{artist}.wav")
+        # Trasformazione in formato salvabile
+        audio_tensor = audio.detach().cpu().squeeze(0)  # [canali, campioni]
 
-tracks = pandas.read_csv(Config.CSV_FILE,  index_col=0, header=[0,1])
+        filename = f"sample_{i}_{artist.replace(' ', '_')}_{stage}.wav"
+        filepath = os.path.join(output_dir, filename)
 
-sub_tracks = tracks[tracks[('set', 'subset')].isin(["small", "medium"])] #106 mila
-track_infos = tracks[[('track', 'genre_top'),('artist','name'),('album','information')]].dropna() #49 mila
+        torchaudio.save(filepath, audio_tensor, sample_rate)
+        print(f"Salvato: {filepath}")
 
-# --- Esempio di utilizzo ---
-forget_df, retain_df = create_forget_set(track_infos)
+if __name__ == "__main__":
+    start_time_total = time.time()
+    run_timestamp = time.strftime("%Y%m%d-%H%M")
 
-# Se ti servono solo gli ID (gli indici):
-forget_ids = forget_df.index
+    # 1. Caricamento Dati
+    tracks = pandas.read_csv(Config.CSV_FILE, index_col=0, header=[0, 1])
+    track_infos = tracks[[('track', 'genre_top'), ('artist', 'name')]].dropna()
 
-# Carica il Modello Stable Audio Open
-model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
+    # 2. Split Forget/Retain
+    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=2)
+    print(f"Artisti da dimenticare: {chosen_artists}")
 
-# GENERAZIONE PRE UNLEARNING
-# Recupera i prompt testuali per i f_ids (necessita di accesso ai metadati FMA)
-forget_artists = track_infos.loc[forget_ids, ('artist', 'name')].tolist()
+    # 3. Caricamento Modello
+    model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
 
-generate_samples_from_metadata(model, model_config, forget_artists, stage="pre")
+    model.to(Config.DEVICE)
 
-# UNLEARNING
 
-# GENERAZIONE POST-UNLEARNING
-generate_samples_from_metadata(model, model_config, forget_artists, stage="post")
+    # 4. GENERAZIONE PRE-UNLEARNING
+    # Usiamo il dataframe per generare basandoci sui metadati reali
+    #generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=run_timestamp)
+
+    # 5. PREPARAZIONE DATALOADERS PER UNLEARNING
+    # Usiamo la classe FMADataset definita precedentemente che carica l'audio reale
+    forget_dataset = FMADataset(forget_df.index, [0] * len(forget_df), metadata_df=tracks)
+    retain_dataset = FMADataset(retain_df.index.to_series().sample(n=1000), [0] * 1000,
+                                metadata_df=tracks)  # Esempio: 1000 brani di retain
+
+    forget_loader = DataLoader(forget_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
+    retain_loader = DataLoader(retain_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
+
+    # 6. UNLEARNING
+    # Ora passiamo i loader, non i dataframe
+    print("Inizio Unlearning...")
+    unl_fine_tuning(model, forget_loader, retain_loader, model_config)
+
+    # 7. GENERAZIONE POST-UNLEARNING
+    generate_samples_from_metadata(model, model_config, forget_df, stage="post", run_id=run_timestamp)
+
+    duration = time.time() - start_time_total
+    print(f"Esecuzione completata in: {duration / 60:.2f} minuti")
