@@ -6,7 +6,7 @@ from config import *
 
 
 class FMADataset(Dataset):
-    def __init__(self, track_ids, labels, metadata_df, target_samples=None):
+    def __init__(self, track_ids, metadata_df, target_samples=None):
         """
         track_ids: ID dei brani
         labels: Etichette numeriche (opzionali per Stable Audio, ma utili per coerenza)
@@ -14,7 +14,6 @@ class FMADataset(Dataset):
         target_samples: Numero di campioni (Config.SAMPLE_RATE * Config.DURATION)
         """
         self.track_ids = track_ids
-        self.labels = labels
         self.metadata = metadata_df
         self.target_samples = target_samples or (Config.SAMPLE_RATE * Config.DURATION)
 
@@ -61,7 +60,6 @@ class FMADataset(Dataset):
 
     def __getitem__(self, idx):
         track_id = self.track_ids[idx]
-        label = self.labels[idx]
 
         # Costruzione path FMA
         tid_str = f"{track_id:06d}"
@@ -80,4 +78,4 @@ class FMADataset(Dataset):
         prompt = self.get_prompt_from_fma(track_id)
 
         # Ritorna: Waveform per la loss, il prompt per il condizionamento, e l'ID
-        return waveform, prompt, int(label)
+        return waveform, prompt

@@ -1,6 +1,6 @@
 import torch
 import torchaudio
-from torch import optim
+import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model
 from diffusers import AutoencoderOobleck
 from config import Config
@@ -13,7 +13,8 @@ def setup_lora(model, lr):
         lora_dropout=0.05,
     )
     model = get_peft_model(model, lora_config)
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     return model, optimizer
 
 
@@ -33,7 +34,6 @@ def load_vae(device):
     autoencoder.load_state_dict(ckpt['state_dict'], strict=False)
     return autoencoder.eval().to(device)
 
-
 def get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device):
     batch_size = waveforms.shape[0]
     prompts_list = [prompts] if isinstance(prompts, str) else list(prompts)
@@ -47,74 +47,105 @@ def get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device)
     try:
         cond = model.conditioner(input_data, device=device)
     except TypeError:
-        # Fallback per formati batch alternativi
         batch_list = [{"prompt": p, "seconds_start": 0, "seconds_total": 30} for p in prompts_list]
         cond = model.conditioner(batch_list, device=device)
 
-    posterior = autoencoder.encode(waveforms)
-    latents = posterior.latent_dist.mean * 0.18215
+    with torch.no_grad(): # per risparmiare memoria
+        posterior = autoencoder.encode(waveforms)
+        latents = posterior.latent_dist.mean * 0.18215
+
     return cond, latents
 
-def unl_fine_tuning(model, forget_loader, epochs, lr):
+def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unlearn):
     device = next(model.parameters()).device
     model, optimizer = setup_lora(model, lr)
     autoencoder = load_vae(device)
+    model.train()
 
     for epoch in range(epochs):
-        model.train()
-        for batch_idx, (waveforms, prompts, _) in enumerate(forget_loader):
-            optimizer.zero_grad()
-            waveforms = waveforms.to(device)
+        retain_iter = iter(retain_loader)
+        total_f, total_r, count = 0, 0, 0
 
-            with torch.no_grad():
-                cond, latents = get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device)
-
-            t = torch.rand(waveforms.shape[0], device=device)
-            loss = model(latents, t=t, cond=cond).mean()
-
-            (-loss).backward()
-            optimizer.step()
-
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Batch {batch_idx} | Ascent (Forget) Loss: {loss.item():.4f}")
-
-    return model
-
-
-def unl_gradient_ascent(model, forget_loader, retain_loader, model_config, epochs, lr, alpha=1.5, beta=1.0):
-    device = next(model.parameters()).device
-    model, optimizer = setup_lora(model, lr)
-    vae = load_vae(device)
-    retain_iter = iter(retain_loader)
-
-    for epoch in range(epochs):
-        model.train()
-        for waveforms_f, prompts_f, _ in forget_loader:
-            optimizer.zero_grad()
-
-            # --- FORGET (Gradient Ascent) ---
-            cond_f, latents_f = get_conditioning_and_latents(model, vae, waveforms_f.to(device), prompts_f, device)
-            loss_forget = model(latents_f, t=torch.rand(latents_f.shape[0], device=device), cond=cond_f).mean()
-
-            # --- RETAIN (Gradient Descent) ---
+        for batch_forget in forget_loader:
             try:
-                waveforms_r, prompts_r, _ = next(retain_iter)
+                batch_retain = next(retain_iter)
             except StopIteration:
                 retain_iter = iter(retain_loader)
-                waveforms_r, prompts_r, _ = next(retain_iter)
+                batch_retain = next(retain_iter)
 
-            cond_r, latents_r = get_conditioning_and_latents(model, vae, waveforms_r.to(device), prompts_r, device)
-            loss_retain = model(latents_r, t=torch.rand(latents_r.shape[0], device=device), cond=cond_r).mean()
+            w_f, p_f = batch_forget
+            w_r, p_r = batch_retain
+            w_f, w_r = w_f.to(device), w_r.to(device)
 
-            # Bilanciamento: Minimizza retain, Massimizza forget (segno meno)
-            loss = beta * loss_retain - (alpha * loss_forget)
+            # Estrazione latenti e condizionamento
+            cond_f, lat_f = get_conditioning_and_latents(model, autoencoder, w_f, p_f, device)
+            cond_r, lat_r = get_conditioning_and_latents(model, autoencoder, w_r, p_r, device)
+
+            t_f = torch.rand(lat_f.shape[0], device=device)
+            t_r = torch.rand(lat_r.shape[0], device=device)
+
+            # Calcolo delle Loss
+            loss_f = torch.nn.functional.mse_loss(model(lat_f, t=t_f, cond=cond_f), lat_f)
+            loss_r = torch.nn.functional.mse_loss(model(lat_r, t=t_r, cond=cond_r), lat_r)
+            loss = loss_r - lambda_unlearn * loss_f
+
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-    # Merge finale per risolvere il problema del 'cond' in inferenza
-    return model.merge_and_unload()
+            total_f += loss_f.item()
+            total_r += loss_r.item()
+            count += 1
 
-def unl_stochastic_teacher(model, forget_loader, epochs, lr):
+        print(f"Epoca {epoch + 1} | Retain Loss: {total_r / count:.4f} | Forget Loss: {total_f / count:.4f}")
+
+    return model
+
+def unl_gradient_ascent(model, forget_loader, retain_loader, epochs, lr, alpha=1, beta=1):
+    device = next(model.parameters()).device
+    model, optimizer = setup_lora(model, lr)
+    autoencoder = load_vae(device)
+    model.train()
+
+    for epoch in range(epochs):
+        retain_iter = iter(retain_loader)
+        total_f, total_r, count = 0, 0, 0
+
+        for batch_forget in forget_loader:
+            try:
+                batch_retain = next(retain_iter)
+            except StopIteration:
+                retain_iter = iter(retain_loader)
+                batch_retain = next(retain_iter)
+
+            w_f, p_f = batch_forget
+            w_r, p_r = batch_retain
+            w_f, w_r = w_f.to(device), w_r.to(device)
+
+            cond_f, lat_f = get_conditioning_and_latents(model, autoencoder, w_f, p_f, device)
+            cond_r, lat_r = get_conditioning_and_latents(model, autoencoder, w_r, p_r, device)
+
+            t_f = torch.rand(lat_f.shape[0], device=device)
+            t_r = torch.rand(lat_r.shape[0], device=device)
+
+            # Calcolo losses
+            loss_forget = torch.nn.functional.mse_loss(model(lat_f, t=t_f, cond=cond_f), lat_f)
+            loss_retain = torch.nn.functional.mse_loss(model(lat_r, t=t_r, cond=cond_r), lat_r)
+            loss = alpha * loss_retain - beta * loss_forget
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_f += loss_forget.item()
+            total_r += loss_retain.item()
+            count += 1
+
+        print(f"Epoch {epoch + 1}/{epochs} | Retain Loss (Minimizing): {total_r / count:.4f} | Forget Loss (Maximizing): {total_f / count:.4f}")
+
+    return model
+
+def unl_stochastic_teacher(model, forget_loader, retain_loader, epochs, lr, alpha=1, beta=0.5):
     device = next(model.parameters()).device
 
     # 1. Configura LoRA sul modello originale
@@ -123,40 +154,61 @@ def unl_stochastic_teacher(model, forget_loader, epochs, lr):
 
     for epoch in range(epochs):
         model.train()
-        for batch_idx, (waveforms, prompts, _) in enumerate(forget_loader):
+
+        retain_iter = iter(retain_loader)
+        forget_iter = iter(forget_loader)
+
+        num_batches = min(len(retain_loader), len(forget_loader))
+
+        for batch_idx in range(num_batches):
+            try:
+                f_waveforms, f_prompts, _ = next(forget_iter)
+                r_waveforms, r_prompts, _ = next(retain_iter)
+            except StopIteration:
+                break
+
             optimizer.zero_grad()
-            waveforms = waveforms.to(device)
-
+            # --- FORGET STEP (Logica Teacher-Student Inversa) ---
+            f_waveforms = f_waveforms.to(device)
             with torch.no_grad():
-                cond, latents = get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device)
-                t = torch.rand(waveforms.shape[0], device=device)
+                f_cond, f_latents = get_conditioning_and_latents(model, autoencoder, f_waveforms, f_prompts, device)
+                f_t = torch.rand(f_waveforms.shape[0], device=device)
 
-                # TEACHER MODE : disattiviamo temporaneamente LoRA per ottenere la predizione "originale"
+                # Otteniamo la predizione "giusta" dal modello originale (Teacher)
                 with model.disable_adapter():
-                    teacher_preds = model(latents, t=t, cond=cond)
+                    teacher_preds = model(f_latents, t=f_t, cond=f_cond)
 
-            #  STUDENT MODE ---
-            # Calcoliamo la predizione con LoRA attivo
-            student_preds = model(latents, t=t, cond=cond)
+            # Predizione attuale (Student con LoRA)
+            student_preds = model(f_latents, t=f_t, cond=f_cond)
 
-            loss = torch.nn.functional.mse_loss(student_preds, teacher_preds)
+            forget_loss = -torch.nn.functional.mse_loss(student_preds, teacher_preds)
+
+            # --- RETAIN STEP (Logica Standard Fine-tuning) ---
+            r_waveforms = r_waveforms.to(device)
+            r_cond, r_latents = get_conditioning_and_latents(model, autoencoder, r_waveforms, r_prompts, device)
+            r_t = torch.rand(r_waveforms.shape[0], device=device)
+
+            # Predizione sui dati da mantenere
+            retain_preds = model(r_latents, t=r_t, cond=r_cond)
+
+            retain_loss = torch.nn.functional.mse_loss(retain_preds, r_latents)
+
+            # --- COMBINAZIONE DELLE LOSS ---
+            loss = alpha * retain_loss + beta * forget_loss
+
             loss.backward()
             optimizer.step()
 
             if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Batch {batch_idx} | Stochastic Teacher Loss: {loss.item():.4f}")
+                print(f"Epoch {epoch} | Retain Loss: {retain_loss.item():.4f} | Forget Loss: {forget_loss.item():.4f}")
+
     return model
 
 def unl_one_shot_magnitude(model, threshold=0.1):
-    """
-    Identifica i pesi LoRA che si attivano maggiormente sui dati forget
-    e li azzera (pruning) per rimuovere l'informazione.
-    """
-    device = next(model.parameters()).device
     model, _ = setup_lora(model, lr=1e-5)  # Inizializziamo LoRA
 
     model.eval()
-    # In questa tecnica, identifichiamo i parametri LoRA e azzeriamo una % dei pesi
+
     with torch.no_grad():
         for name, param in model.named_parameters():
             if "lora_" in name:
@@ -169,10 +221,6 @@ def unl_one_shot_magnitude(model, threshold=0.1):
 
 
 def unl_amnesiac(model, forget_loader, lr):
-    """
-    Esegue un 'relabeling' dei dati forget con target casuali o
-    semplicemente inverte la direzione del gradiente in un singolo batch massiccio.
-    """
     device = next(model.parameters()).device
     model, optimizer = setup_lora(model, lr)
     autoencoder = load_vae(device)
@@ -182,21 +230,16 @@ def unl_amnesiac(model, forget_loader, lr):
         optimizer.zero_grad()
         waveforms = waveforms.to(device)
 
-        # Generiamo target casuali (Amnesiac) invece di usare quelli del modello
         with torch.no_grad():
             cond, latents = get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device)
-            # Creiamo un rumore target che il modello "dovrebbe" aver predetto
-            # se non avesse mai visto questi dati
             target_noise = torch.randn_like(latents)
 
-            # Il modello cerca di predire il rumore casuale invece delle feature reali
         output = model(latents, t=torch.rand(waveforms.shape[0], device=device), cond=cond)
         loss = torch.nn.functional.mse_loss(output, target_noise)
 
         loss.backward()
         optimizer.step()
 
-        # Di solito Amnesiac richiede pochissimi step (spesso uno solo per batch)
         if batch_idx >= 5: break
 
     print("Amnesiac Unlearning completato.")

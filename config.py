@@ -7,12 +7,12 @@ class Config:
     SUBSET = "medium"
     DEVICE = "cuda"
 
-    EPOCHS = 4
-    LR = 1e-4
-    NUM_ARTISTS = 2
+    EPOCHS = 1
+    LR = 1e-5 #1e-3
+    NUM_ARTISTS = 1
 
     # Unlearning
-    UNL_METHOD = "OSM"   # FT, GA, ST, OSM, A
+    UNL_METHOD = "FT"   # FT, GA, ST, OSM, A
 
     AUDIO_DIR = "../data/fma_large"
     CSV_FILE = "../data/tracks.csv"
@@ -25,7 +25,7 @@ class Config:
     NUM_CLASSES = 8
     NUM_FRAMES = 1292
     DURATION = 30
-    BATCH_SIZE = 4
+    BATCH_SIZE = 8
     fmin = 0
     fmax = SAMPLE_RATE // 2
 

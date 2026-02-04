@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from einops import rearrange
 
-from torch.nn.utils import weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 
 def checkpoint(function, *args, **kwargs):
     kwargs.setdefault("use_reentrant", False)

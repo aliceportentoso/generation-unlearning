@@ -5,7 +5,7 @@ import math
 
 from torch import nn, sin, pow
 from torch.nn import functional as F
-from torch.nn.utils import weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 from torchaudio import transforms as T
 from alias_free_torch import Activation1d
 from typing import List, Literal, Dict, Any, Callable
