@@ -1,8 +1,7 @@
 import torch
-import torchaudio
-import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model
 from diffusers import AutoencoderOobleck
+import matplotlib.pyplot as plt
 from config import Config
 
 def setup_lora(model, lr):
@@ -13,10 +12,8 @@ def setup_lora(model, lr):
         lora_dropout=0.05,
     )
     model = get_peft_model(model, lora_config)
-    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=1e-5)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     return model, optimizer
-
 
 def load_vae(device):
     ckpt_path = "vae_model.ckpt"
@@ -34,7 +31,8 @@ def load_vae(device):
     autoencoder.load_state_dict(ckpt['state_dict'], strict=False)
     return autoencoder.eval().to(device)
 
-def get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device):
+def get_conditioning_and_latents(model, autoencoder, waveforms, prompts):
+    device = Config.DEVICE
     batch_size = waveforms.shape[0]
     prompts_list = [prompts] if isinstance(prompts, str) else list(prompts)
 
@@ -62,6 +60,8 @@ def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unle
     autoencoder = load_vae(device)
     model.train()
 
+    history_f, history_r = [], []
+
     for epoch in range(epochs):
         retain_iter = iter(retain_loader)
         total_f, total_r, count = 0, 0, 0
@@ -78,8 +78,8 @@ def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unle
             w_f, w_r = w_f.to(device), w_r.to(device)
 
             # Estrazione latenti e condizionamento
-            cond_f, lat_f = get_conditioning_and_latents(model, autoencoder, w_f, p_f, device)
-            cond_r, lat_r = get_conditioning_and_latents(model, autoencoder, w_r, p_r, device)
+            cond_r, lat_r = get_conditioning_and_latents(model, autoencoder, w_r, p_r)
+            cond_f, lat_f = get_conditioning_and_latents(model, autoencoder, w_f, p_f)
 
             t_f = torch.rand(lat_f.shape[0], device=device)
             t_r = torch.rand(lat_r.shape[0], device=device)
@@ -97,7 +97,21 @@ def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unle
             total_r += loss_r.item()
             count += 1
 
+        history_f.append(total_f / count)
+        history_r.append(total_r / count)
         print(f"Epoca {epoch + 1} | Retain Loss: {total_r / count:.4f} | Forget Loss: {total_f / count:.4f}")
+
+    # --- Generazione del grafico finale ---
+    plt.figure(figsize=(8, 4))
+    plt.plot(history_r, label='Retain Loss (Qualità)', color='blue', marker='o')
+    plt.plot(history_f, label='Forget Loss (Dimenticati)', color='red', marker='x')
+    plt.title("Andamento Unlearning")
+    plt.xlabel("Epoca")
+    plt.ylabel("Loss (MSE)")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"audio_out/tx2m/20260210-1002_FT_100artists_Loss.png", dpi=300, bbox_inches='tight')
+    plt.show()
 
     return model
 
@@ -122,8 +136,8 @@ def unl_gradient_ascent(model, forget_loader, retain_loader, epochs, lr, alpha=1
             w_r, p_r = batch_retain
             w_f, w_r = w_f.to(device), w_r.to(device)
 
-            cond_f, lat_f = get_conditioning_and_latents(model, autoencoder, w_f, p_f, device)
-            cond_r, lat_r = get_conditioning_and_latents(model, autoencoder, w_r, p_r, device)
+            cond_f, lat_f = get_conditioning_and_latents(model, autoencoder, w_f, p_f)
+            cond_r, lat_r = get_conditioning_and_latents(model, autoencoder, w_r, p_r)
 
             t_f = torch.rand(lat_f.shape[0], device=device)
             t_r = torch.rand(lat_r.shape[0], device=device)
@@ -162,8 +176,8 @@ def unl_stochastic_teacher(model, forget_loader, retain_loader, epochs, lr, alph
 
         for batch_idx in range(num_batches):
             try:
-                f_waveforms, f_prompts, _ = next(forget_iter)
-                r_waveforms, r_prompts, _ = next(retain_iter)
+                f_waveforms, f_prompts = next(forget_iter)
+                r_waveforms, r_prompts = next(retain_iter)
             except StopIteration:
                 break
 
@@ -171,7 +185,7 @@ def unl_stochastic_teacher(model, forget_loader, retain_loader, epochs, lr, alph
             # --- FORGET STEP (Logica Teacher-Student Inversa) ---
             f_waveforms = f_waveforms.to(device)
             with torch.no_grad():
-                f_cond, f_latents = get_conditioning_and_latents(model, autoencoder, f_waveforms, f_prompts, device)
+                f_cond, f_latents = get_conditioning_and_latents(model, autoencoder, f_waveforms, f_prompts)
                 f_t = torch.rand(f_waveforms.shape[0], device=device)
 
                 # Otteniamo la predizione "giusta" dal modello originale (Teacher)
@@ -185,7 +199,7 @@ def unl_stochastic_teacher(model, forget_loader, retain_loader, epochs, lr, alph
 
             # --- RETAIN STEP (Logica Standard Fine-tuning) ---
             r_waveforms = r_waveforms.to(device)
-            r_cond, r_latents = get_conditioning_and_latents(model, autoencoder, r_waveforms, r_prompts, device)
+            r_cond, r_latents = get_conditioning_and_latents(model, autoencoder, r_waveforms, r_prompts)
             r_t = torch.rand(r_waveforms.shape[0], device=device)
 
             # Predizione sui dati da mantenere
@@ -226,12 +240,12 @@ def unl_amnesiac(model, forget_loader, lr):
     autoencoder = load_vae(device)
     model.train()
 
-    for batch_idx, (waveforms, prompts, _) in enumerate(forget_loader):
+    for batch_idx, (waveforms, prompts) in enumerate(forget_loader):
         optimizer.zero_grad()
         waveforms = waveforms.to(device)
 
         with torch.no_grad():
-            cond, latents = get_conditioning_and_latents(model, autoencoder, waveforms, prompts, device)
+            cond, latents = get_conditioning_and_latents(model, autoencoder, waveforms, prompts)
             target_noise = torch.randn_like(latents)
 
         output = model(latents, t=torch.rand(waveforms.shape[0], device=device), cond=cond)
@@ -244,19 +258,3 @@ def unl_amnesiac(model, forget_loader, lr):
 
     print("Amnesiac Unlearning completato.")
     return model
-
-def load_audio_tensor(track_id, target_samples):
-    path = Config.get_audio_path(track_id)
-    waveform, sr = torchaudio.load(path)
-
-    if sr != Config.SAMPLE_RATE:
-        resampler = torchaudio.transforms.Resample(sr, Config.SAMPLE_RATE)
-        waveform = resampler(waveform)
-
-    if waveform.size(1) > target_samples:
-        waveform = waveform[:, :target_samples]
-    else:
-        padding = target_samples - waveform.size(1)
-        waveform = torch.nn.functional.pad(waveform, (0, padding))
-
-    return waveform.unsqueeze(0).to(Config.DEVICE)

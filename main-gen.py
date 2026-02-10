@@ -1,8 +1,9 @@
-import numpy
 import pandas
 import torch
 import torchaudio
 from torch.utils.data import DataLoader
+import os
+import shutil
 
 from dataset import FMADataset
 from metrics import compute_fad, compute_kld, compute_clap
@@ -13,6 +14,7 @@ import time
 from stable_audio_tools import get_pretrained_model
 from config import Config
 from stable_audio_tools.inference.generation import generate_diffusion_cond
+import warnings
 
 def create_forget_set(df, n_samples):
     forget_set = df.sample(n=n_samples, random_state=seed)
@@ -36,13 +38,12 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage, run_id
     sample_rate = model_config["sample_rate"]
 
     test_df = forget_df.drop_duplicates(subset=[('artist', 'name')])
-
-    output_dir = f"audio_out/tx2m/{run_id}_{Config.UNL_METHOD}_{stage}"
+    output_dir = f"audio_out/tx2m/{run_id}_{Config.UNL_METHOD}_{Config.NUM_ARTISTS}artists_{stage}"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"--- Generazione {stage.upper()}: {len(test_df)} ---")
 
-    for i, (idx, row) in enumerate(test_df.head(1).iterrows()):
+    for i, (idx, row) in enumerate(test_df.iterrows()):
         artist = row[('artist', 'name')]
         genre = row[('track', 'genre_top')]
         prompt = f"{genre} song in the style of {artist}"
@@ -76,69 +77,60 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage, run_id
 
     return output_dir
 
-
-import os
-import shutil
-
 def create_dir_real_forget(df, source_root, target_dir):
-
-    # 1. Crea la directory di destinazione se non esiste
     if os.path.exists(target_dir):
         shutil.rmtree(target_dir)
-        os.makedirs(target_dir)
+    os.makedirs(target_dir)
 
-    count = 0
-    errors = 0
-
-    print("Copia dei brani in corso...")
     for track_id, row in df.iterrows():
         track_id_str = f"{int(track_id):06d}"
-
-        # 3. Costruisci il path relativo: le prime 3 cifre sono la cartella
-        # Esempio: 114577 -> cartella '114', file '114577.mp3'
         subdir = track_id_str[:3]
         relative_path = os.path.join(subdir, f"{track_id_str}.mp3")
-
-        # 4. Path sorgente completo
         source_path = os.path.join(source_root, relative_path)
-
-        # 5. Path destinazione (copiamo tutto "piatto" nella nuova cartella)
         dest_path = os.path.join(target_dir, f"{track_id_str}.mp3")
 
+        if os.path.exists(source_path):
+            shutil.copy(source_path, dest_path)
+        else:
+            print(f"File {source_path} non trovato.")
+
 if __name__ == "__main__":
+
+    warnings.filterwarnings("ignore")
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     start_time_total = time.time()
     run_timestamp = time.strftime("%Y%m%d-%H%M")
-    seed = numpy.random.randint(0, 2 ** 32 - 1)
+    #seed = numpy.random.randint(0, 2 ** 32 - 1)
+    seed = 12345
 
-    # 1. Caricamento Dati
+    # Caricamento Dati e modello
     tracks = pandas.read_csv(Config.CSV_FILE, index_col=0, header=[0, 1])
     track_infos = tracks[[('track', 'genre_top'), ('artist', 'name')]].dropna()
 
-    # 2. Split Forget/Retain
-    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=Config.NUM_ARTISTS)
-    print(f"Artisti da dimenticare: {chosen_artists}")
-
-    # 3. Caricamento Modello
     model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
     model.to(Config.DEVICE)
 
+    forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=Config.NUM_ARTISTS)
+    print(f"Artisti da dimenticare: {chosen_artists}")
+
+    # NON SERVE RIFARE SEMPRE, uso quelli fissati
+    # uso dataframe per generare basandomi sui metadati reali
+    # create_dir_real_forget(forget_df, "../data/fma_large", real_dir)
+    # generazione pre-unlearning
+    # pre_dir = generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=run_timestamp)
+
     real_dir = "../data/forget_set"
-    create_dir_real_forget(forget_df, "../data/fma_large", real_dir)
+    pre_dir = "audio_out/tx2m/100artists_generation_pre"
 
-    # 4. GENERAZIONE PRE-UNLEARNING
-    # Usiamo il dataframe per generare basandoci sui metadati reali
-    pre_dir = generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=run_timestamp)
-
-    # 5. PREPARAZIONE DATALOADERS PER UNLEARNING
+    # PREPARAZIONE DATALOADERS PER UNLEARNING
     forget_dataset = FMADataset(forget_df.index, metadata_df=tracks)
     retain_dataset = FMADataset(retain_df.index, metadata_df=tracks)
 
     forget_loader = DataLoader(forget_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
     retain_loader = DataLoader(retain_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
 
-    # 6. UNLEARNING
+    # UNLEARNING METHODS
     print(f"Inizio Unlearning con metodo {Config.UNL_METHOD}...")
 
     if Config.UNL_METHOD == "FT":
@@ -157,28 +149,36 @@ if __name__ == "__main__":
     else:
         print("unknown method")
 
-    # 7. GENERAZIONE POST-UNLEARNING
+    # GENERAZIONE POST-UNLEARNING
     post_dir = generate_samples_from_metadata(unl_model.model, model_config, forget_df, stage="post",
                                               run_id=run_timestamp)
+    print("PRE DIR:")
+    print(pre_dir)
+    print("POST DIR:")
+    print(post_dir)
 
+    # METRICS
     fad_pre = compute_fad(real_dir, pre_dir)
-    print(f"FAD pre = {fad_pre}")
     fad_post = compute_fad(real_dir, post_dir)
-    print(f"FAD post = {fad_post}")
 
     kld_pre = compute_kld(real_dir, pre_dir)
-    print(f"KLD pre = {kld_pre}")
     kld_post = compute_kld(real_dir, post_dir)
-    print(f"KLD post = {kld_post}")
 
-    clap_pre = compute_clap(pre_dir, forget_df)
-    print(f"CLAP pre = {clap_pre}")
-    clap_post = compute_clap(post_dir, forget_df)
-    print(f"CLAP post = {clap_post}")
+    clap_pre = compute_clap(pre_dir)
+    clap_post = compute_clap(post_dir)
 
-    print(f"DIFFERENZA DI FAD: {fad_post - fad_pre}")
-    print(f"DIFFERENZA DI KLD: {kld_post - kld_pre}")
-    print(f"DIFFERENZA DI CLAP: {clap_post - clap_pre}")
+    # PRINT RESULTS
+    print("\nCONFIGS:")
+    print(f"Artists to forget: {Config.NUM_ARTISTS}")
+    print(f"Songs to forget: {len(forget_df)}")
+    print(f"Unlearn Method: {Config.UNL_METHOD}")
+    print(f"Learning Rate: {Config.LR}")
+    print(f"Epochs: {Config.EPOCHS}")
 
     duration = time.time() - start_time_total
-    print(f"Esecuzione completata in: {duration / 60:.2f} minuti")
+    print(f"\nRUNNING TIME: {duration / 60:.2f} minutes")
+
+    print("\n\t\tPRE\t\tPOST\t\tDIFF")
+    print(f"FAD\t\t{fad_pre:.3f}\t\t\t{fad_post:.3f}\t\t\t{fad_post - fad_pre:.3f}")
+    print(f"KLD\t\t{kld_pre:.3f}\t\t\t{kld_post:.3f}\t\t\t{kld_post - kld_pre:.3f}")
+    print(f"CLAP\t{clap_pre:.3f}\t\t\t{clap_post:.3f}\t\t\t{clap_post - clap_pre:.3f}\n")

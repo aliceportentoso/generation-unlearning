@@ -3,9 +3,8 @@ import torch
 import torchaudio
 from einops import rearrange
 
+from config import Config
 from stable_audio_tools.inference.generation import generate_diffusion_cond
-from stable_audio_tools.models.factory import create_model_from_config
-from stable_audio_tools.models.utils import load_ckpt_state_dict, copy_state_dict
 
 from datetime import datetime
 timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
@@ -16,25 +15,7 @@ def generate(prompt):
         "seconds_start": 0,
         "seconds_total": 30  # durata in secondi
     }]
-#
-# my_model = False
-# if my_model:
-#     #name = "stable_audio_tools/yzxnx12q/checkpoints/UNWRAPPED_epoch=0-step=10000.ckpt.safetensors"
-#     name = f"audio_out/fine_tuning/{timestamp}_{conditioning[0]['prompt'].replace('', '_')}"
-#
-#     with open("stable_audio_tools/configs/model.json") as f:
-#         model_config = json.load(f)
-#
-#     model = create_model_from_config(model_config)
-#
-#     copy_state_dict(
-#         model,
-#         load_ckpt_state_dict(
-#             name
-#         )
-#     )
-#
-# else:
+
     from stable_audio_tools import get_pretrained_model
 
     model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
@@ -43,7 +24,7 @@ def generate(prompt):
 
     name = f"audio_out/pretrain_model/{timestamp}_{conditioning[0]['prompt'].replace('', '_')}"
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = Config.DEVICE
     model = model.to(device)
 
     with torch.no_grad():

@@ -23,4 +23,4 @@ def get_custom_metadata(info, audio):
     row = df.loc[track_id]
 
     # 3. ritorna SOLO quello che serve al conditioning
-    return {"prompt": f"Artist: {str(row[("artist", "name")])}, Genre: {str(row[("track", "genres")])}"}
+    return {"prompt": f"Artist: {str(row[('artist', 'name')])}, Genre: {str(row[('track', 'genres')])}"}

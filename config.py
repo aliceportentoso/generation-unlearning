@@ -1,16 +1,15 @@
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+import torch
 
 @dataclass
 class Config:
 
-    SUBSET = "medium"
-    DEVICE = "cuda"
+    SUBSET = "large"
+    DEVICE = torch.device("cuda:0")# if torch.cuda.is_available() else "cpu")
 
-    EPOCHS = 1
-    LR = 1e-5 #1e-3
-    NUM_ARTISTS = 1
-
+    EPOCHS = 8
+    LR = 1e-4 #1e-3
+    NUM_ARTISTS = 100
     # Unlearning
     UNL_METHOD = "FT"   # FT, GA, ST, OSM, A
 
@@ -36,4 +35,3 @@ class Config:
         print(f"Learning rate  : {cls.LR}")
         print(f"Dataset SUBSET : {cls.SUBSET}")
         print(f"METHOD         : {cls.UNL_METHOD}")
-
