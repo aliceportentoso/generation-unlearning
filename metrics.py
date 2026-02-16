@@ -6,84 +6,107 @@ from tqdm import tqdm
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
-from sklearn.metrics.pairwise import cosine_similarity
+
+from CLAPScore_for_LASS_main.models.clap_encoder import CLAP_Encoder
 from config import Config
 
 import os
 import torch
 import numpy as np
-import laion_clap
-from torch.nn.functional import cosine_similarity
+from frechet_audio_distance import FrechetAudioDistance
+from scipy.stats import entropy
 
-def get_embeddings(model, folder_path):
-    all_embeddings = []
-    TARGET_SR = 16000
-    model.to(Config.DEVICE)
+def compute_kld(real_path, gen_path, n_bins=50, eps=1e-10):
+    model = get_basic_model(mode="logits").to(Config.DEVICE)
     model.eval()
 
-    files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.wav', '.mp3'))]
-    for file in tqdm(files): #, desc=f"Extracting from {os.path.basename(folder_path)}"):
-        path = os.path.join(folder_path, file)
-        try:
-            waveform, sr = torchaudio.load(path)
-            if waveform.shape[0] > 1:  # Mono
-                waveform = torch.mean(waveform, dim=0, keepdim=True)
-            if sr != TARGET_SR:
-                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=TARGET_SR)
-                waveform = resampler(waveform)
+    p_dist = get_dataset_distribution(real_path, model)
+    q_dist = get_dataset_distribution(gen_path, model)
 
-            audio_input = waveform.squeeze().numpy()
+    # Evita log(0)
+    P = np.clip(p_dist, eps, 1.0)
+    Q = np.clip(q_dist, eps, 1.0)
 
-            with torch.no_grad():
-                emb_frames = model.forward(audio_input, fs=TARGET_SR)
+    # Normalizza
+    P /= np.sum(P)
+    Q /= np.sum(Q)
 
-                if torch.is_tensor(emb_frames):
-                    emb_frames = emb_frames.cpu().numpy()
+    # KL divergence
+    kld = entropy(P, Q)
+    return kld
 
-                if emb_frames.ndim > 1:
-                    emb_avg = np.mean(emb_frames, axis=0)
-                else:
-                    emb_avg = emb_frames
-
-                all_embeddings.append(emb_avg)
-
-        except Exception as e:
-            print(f"Errore su {file}: {e}")
-
-    return np.array(all_embeddings)
 
 def compute_fad(real_path, gen_path):
-    model = torch.hub.load('harritaylor/torchvggish', 'vggish')
-    model.to(Config.DEVICE)
-    model.eval()
+    fad = FrechetAudioDistance(model_name="vggish", sample_rate=16000)
 
-    real_embeddings = get_embeddings(model, real_path)
-    gen_embeddings = get_embeddings(model, gen_path)
-    plot_fad(real_embeddings, gen_embeddings)
+    # --- Calcolo FAD ---
+    score = fad.score(real_path, gen_path)
 
-    if len(real_embeddings) < 2 or len(gen_embeddings) < 2:
-        return float('nan')
+    return score
 
-    mu_r = np.mean(real_embeddings, axis=0)
-    sigma_r = np.cov(real_embeddings, rowvar=False)
 
-    mu_g = np.mean(gen_embeddings, axis=0)
-    sigma_g = np.cov(gen_embeddings, rowvar=False)
+def compute_clap(folder_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pretrained_checkpoint = "music_speech_audioset_epoch_15_esc_89.98.pt"
+    model = CLAP_Encoder(device=device, pretrained_path=pretrained_checkpoint).eval()
 
-    diff = mu_r - mu_g
-    mean_dist = diff.dot(diff)
+    scores_dict = {}
+    scores_list = []
 
-    eps = 1e-6
-    sigma_r += np.eye(sigma_r.shape[0]) * eps
-    sigma_g += np.eye(sigma_g.shape[0]) * eps
+    with torch.no_grad():
+        for filename in tqdm(os.listdir(folder_path)):
+            if not filename.endswith(".wav"):
+                continue
 
-    covmean, _ = sqrtm(sigma_r.dot(sigma_g), disp=False)
-    if np.iscomplexobj(covmean):
-        covmean = covmean.real
+            audio_path = os.path.join(folder_path, filename)
+            prompt_text = filename.replace(".wav", "").replace("_", " ").replace("-", " ")
 
-    fad_score = mean_dist + np.trace(sigma_r + sigma_g - 2 * covmean)
+            if filename.endswith(".wav"):
+                name_parts = filename.replace(".wav", "").replace("-", " ").split("_")
+                genre = "".join(name_parts[2])
+                artist = " ".join(name_parts[3:])
+                print("\ngenre, artist = ")
+                print(genre, artist)
+                prompt = f"{genre} song in the style of {artist}"
+            # --- Carica audio ---
+            waveform, sr = torchaudio.load(audio_path)  # [channels, samples]
 
-    return fad_score
+            # Se stereo, media sui canali
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+            # Sposta su device
+            waveform = waveform.to(device)
+
+            # --- DEBUG ---
+            print("DEBUG: Prompt text:", prompt_text)
+            print("DEBUG: Waveform original shape:", waveform.shape)
+            print("DEBUG: Waveform numel:", waveform.numel())
+
+            # --- Prepara embedding audio ---
+            if waveform.numel() == 0:
+                print(f"WARNING: Audio file {filename} is empty, skipping...")
+                continue
+
+            # Rimuove solo l’asse dei canali se c’è, mantiene almeno 1D
+            #audio_tensor = waveform.squeeze(0) if waveform.dim() > 1 else waveform
+            audio_tensor = waveform
+            print("DEBUG: Waveform after squeeze/fix shape:", audio_tensor.shape)
+
+            # --- Estrai embedding ---
+            text_emb = model.get_query_embed(modality='text', text=[prompt_text], device=device)
+            audio_emb = model.get_query_embed(modality='audio', audio=audio_tensor.to(device), device=device)
+
+            # --- Calcola CLAP score (dot product o cosine similarity) ---
+            score = (text_emb * audio_emb).sum(-1).item()
+
+            scores_dict[filename] = score
+            scores_list.append(score)
+
+    avg_score = sum(scores_list) / len(scores_list) if scores_list else 0.0
+    print(f"Average CLAPScore: {avg_score:.4f}")
+
+    return avg_score
 
 def get_dataset_distribution(folder_path, model):
     all_probs = []
@@ -128,63 +151,13 @@ def get_dataset_distribution(folder_path, model):
 
     return np.mean(np.vstack(all_probs), axis=0)
 
-def compute_kld(real_path, gen_path):
-    model = get_basic_model(mode="logits").to(Config.DEVICE)
-    model.eval()
 
-    p_dist = get_dataset_distribution(real_path, model)
-    q_dist = get_dataset_distribution(gen_path, model)
 
-    eps = 1e-7
-    p_dist = np.clip(p_dist, eps, 1.0)
-    q_dist = np.clip(q_dist, eps, 1.0)
 
-    plot_kld(p_dist, q_dist)
-    kld_score = np.sum(p_dist * (np.log(p_dist) - np.log(q_dist)))
 
-    return kld_score
 
-def compute_clap(folder_path):
 
-    ckpt_path = "music_audioset_epoch_15_esc_90.14.pt"
-    model = laion_clap.CLAP_Module(enable_fusion=False, amodel='HTSAT-base', device=Config.DEVICE)
 
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint non trovato in: {ckpt_path}")
-
-    model.load_ckpt(ckpt_path)
-    model.eval()
-
-    scores = []
-
-    with torch.no_grad():
-        for filename in os.listdir(folder_path):
-            if filename.endswith(".wav"):
-                prompt = filename.replace(".wav", "").replace("_", " ").replace("-", " ")
-                audio_path = os.path.join(folder_path, filename)
-
-                try:
-                    text_embed = model.get_text_embedding([prompt])
-                    audio_embed = model.get_audio_embedding_from_filelist(x=[audio_path])
-
-                    t_tensor = torch.from_numpy(text_embed).to(Config.DEVICE)
-                    a_tensor = torch.from_numpy(audio_embed).to(Config.DEVICE)
-
-                    similarity = cosine_similarity(t_tensor, a_tensor).item()
-
-                    scores.append(similarity)
-
-                except Exception as e:
-                    print(f"Errore durante l'analisi di {filename}: {e}")
-
-    if not scores:
-        print("Nessun file audio processato correttamente.")
-        return 0.0
-
-    avg_score = np.mean(scores)
-    plot_clap(scores)
-
-    return avg_score
 
 def plot_fad(real_embeddings, gen_embeddings):
     pca = PCA(n_components=2)

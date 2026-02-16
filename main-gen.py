@@ -16,11 +16,6 @@ from config import Config
 from stable_audio_tools.inference.generation import generate_diffusion_cond
 import warnings
 
-def create_forget_set(df, n_samples):
-    forget_set = df.sample(n=n_samples, random_state=seed)
-    retain_set = df.drop(forget_set.index)
-    return forget_set, retain_set
-
 def create_forget_set_by_artist(df, n_artists):
     unique_artists = df[('artist', 'name')].unique()
     artists_to_forget = pandas.Series(unique_artists).sample(n=n_artists, random_state=seed).values
@@ -38,7 +33,7 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage, run_id
     sample_rate = model_config["sample_rate"]
 
     test_df = forget_df.drop_duplicates(subset=[('artist', 'name')])
-    output_dir = f"audio_out/tx2m/{run_id}_{Config.UNL_METHOD}_{Config.NUM_ARTISTS}artists_{stage}"
+    output_dir = f"audio_out/tx2m/{run_id}_{Config.UNL_METHOD}/{run_id}_{Config.UNL_METHOD}_{Config.NUM_ARTISTS}artists_{stage}"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"--- Generazione {stage.upper()}: {len(test_df)} ---")
@@ -68,8 +63,7 @@ def generate_samples_from_metadata(model, model_config, forget_df, stage, run_id
             )
 
         audio_tensor = audio.detach().cpu().squeeze(0)  # [canali, campioni]
-
-        filename = f'sample_{i}_{artist.replace(" ", "_").replace("/","_")}.wav'
+        filename = f'sample_{i}_{genre.replace(" ", "-").replace("/","-")}_{artist.replace(" ", "-").replace("/","-")}.wav'
         filepath = os.path.join(output_dir, filename)
 
         torchaudio.save(filepath, audio_tensor, sample_rate)
@@ -95,12 +89,10 @@ def create_dir_real_forget(df, source_root, target_dir):
             print(f"File {source_path} non trovato.")
 
 if __name__ == "__main__":
-
     warnings.filterwarnings("ignore")
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     start_time_total = time.time()
-    run_timestamp = time.strftime("%Y%m%d-%H%M")
     #seed = numpy.random.randint(0, 2 ** 32 - 1)
     seed = 12345
 
@@ -108,20 +100,36 @@ if __name__ == "__main__":
     tracks = pandas.read_csv(Config.CSV_FILE, index_col=0, header=[0, 1])
     track_infos = tracks[[('track', 'genre_top'), ('artist', 'name')]].dropna()
 
+    tracks_to_remove = [
+        1486, 2624, 3284, 5574, 8669, 10116, 11583, 12838, 13529, 14116, 14180, 20814, 22554, 23429, 23430,
+        23431, 25173, 25174, 25175, 25176, 25180, 29345, 29346, 29352, 29356, 33411, 33413, 33414, 33417,
+        33418, 33419, 33425, 35725, 39363, 41745, 42986, 43753, 50594, 50782, 53668, 54569, 54582, 61480,
+        61822, 63422, 63997, 65753, 72656, 72980, 73510, 80391, 80553, 82699, 84503, 84504, 84522, 84524,
+        86656, 86659, 86661, 86664, 87057, 90244, 90245, 90247, 90248, 90250, 90252, 90253, 90442, 90445,
+        91206, 92479, 94052, 94234, 95253, 96203, 96207, 96210, 98105, 98558, 98559, 98560, 98562, 98571,
+        99134, 101265, 101272, 101275, 102241, 102243, 102247, 102249, 102289, 105247, 106409, 106412,
+        106415, 106628, 108920, 108925, 109266, 110236, 115610, 117441, 126981, 127336, 127928, 129207,
+        129800, 130328, 130748, 130751, 131545, 133297, 133641, 133647, 134887, 140449, 140450, 140451,
+        140452, 140453, 140454, 140455, 140456, 140457, 140458, 140459, 140460, 140461, 140462, 140463,
+        140464, 140465, 140466, 140467, 140468, 140469, 140470, 140471, 140472, 142614, 143992, 144518,
+        144619, 145056, 146056, 147419, 147424, 148786, 148787, 148788, 148789, 148790, 148791, 148792,
+        148793, 148794, 148795, 151920, 155051, 134956
+    ]
+
+    # Rimuovi i track problematici dall'indice
+    track_infos = track_infos.drop(tracks_to_remove, errors='ignore')
+
     model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
     model.to(Config.DEVICE)
 
     forget_df, retain_df, chosen_artists = create_forget_set_by_artist(track_infos, n_artists=Config.NUM_ARTISTS)
     print(f"Artisti da dimenticare: {chosen_artists}")
 
-    # NON SERVE RIFARE SEMPRE, uso quelli fissati
-    # uso dataframe per generare basandomi sui metadati reali
-    # create_dir_real_forget(forget_df, "../data/fma_large", real_dir)
-    # generazione pre-unlearning
-    # pre_dir = generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=run_timestamp)
-
     real_dir = "../data/forget_set"
-    pre_dir = "audio_out/tx2m/100artists_generation_pre"
+    create_dir_real_forget(forget_df, "../data/fma_large", real_dir)
+
+    pre_dir = "audio_out/tx2m/50artists_generation_pre"
+    #pre_dir = generate_samples_from_metadata(model, model_config, forget_df, stage="pre", run_id=Config.TIMESTAMP)
 
     # PREPARAZIONE DATALOADERS PER UNLEARNING
     forget_dataset = FMADataset(forget_df.index, metadata_df=tracks)
@@ -135,10 +143,10 @@ if __name__ == "__main__":
 
     if Config.UNL_METHOD == "FT":
         unl_model = unl_fine_tuning(model, forget_loader, retain_loader, epochs=Config.EPOCHS, lr=Config.LR,
-                                    lambda_unlearn=1.5)
+                                    lambda_unlearn=0.5)
     elif Config.UNL_METHOD == "GA":
         unl_model = unl_gradient_ascent(model, forget_loader, retain_loader, epochs=Config.EPOCHS, lr=Config.LR,
-                                        alpha=0.01)
+                                        alpha=1, beta=1)
     elif Config.UNL_METHOD == "ST":
         unl_model = unl_stochastic_teacher(model, forget_loader, retain_loader, epochs=Config.EPOCHS, lr=Config.LR,
                                            alpha=0.01, beta=0.01)
@@ -151,7 +159,7 @@ if __name__ == "__main__":
 
     # GENERAZIONE POST-UNLEARNING
     post_dir = generate_samples_from_metadata(unl_model.model, model_config, forget_df, stage="post",
-                                              run_id=run_timestamp)
+                                              run_id=Config.TIMESTAMP)
     print("PRE DIR:")
     print(pre_dir)
     print("POST DIR:")

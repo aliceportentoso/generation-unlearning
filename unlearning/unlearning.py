@@ -1,7 +1,8 @@
-import torch
+from pathlib import Path
 from peft import LoraConfig, get_peft_model
 from diffusers import AutoencoderOobleck
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from config import Config
 
 def setup_lora(model, lr):
@@ -54,6 +55,16 @@ def get_conditioning_and_latents(model, autoencoder, waveforms, prompts):
 
     return cond, latents
 
+def to_device_recursive(obj, device):
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device)
+    elif isinstance(obj, dict):
+        return {k: to_device_recursive(v, device) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [to_device_recursive(i, device) for i in obj]
+    else:
+        return obj
+
 def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unlearn):
     device = next(model.parameters()).device
     model, optimizer = setup_lora(model, lr)
@@ -66,7 +77,9 @@ def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unle
         retain_iter = iter(retain_loader)
         total_f, total_r, count = 0, 0, 0
 
-        for batch_forget in forget_loader:
+        pbar = tqdm(forget_loader, desc=f"Epoca {epoch + 1}/{epochs}", unit="batch")
+
+        for batch_forget in pbar:
             try:
                 batch_retain = next(retain_iter)
             except StopIteration:
@@ -97,25 +110,36 @@ def unl_fine_tuning(model, forget_loader, retain_loader, epochs, lr, lambda_unle
             total_r += loss_r.item()
             count += 1
 
+            pbar.set_postfix({
+                'L_ret': f"{total_r / count:.4f}",
+                'L_for': f"{total_f / count:.4f}"
+            })
+
         history_f.append(total_f / count)
         history_r.append(total_r / count)
         print(f"Epoca {epoch + 1} | Retain Loss: {total_r / count:.4f} | Forget Loss: {total_f / count:.4f}")
 
     # --- Generazione del grafico finale ---
     plt.figure(figsize=(8, 4))
-    plt.plot(history_r, label='Retain Loss (Qualità)', color='blue', marker='o')
-    plt.plot(history_f, label='Forget Loss (Dimenticati)', color='red', marker='x')
-    plt.title("Andamento Unlearning")
-    plt.xlabel("Epoca")
+    plt.subplot(1, 2, 1)
+    plt.plot(history_r, label='Retain Loss')
+    plt.plot(history_f, label='Forget Loss')
+    plt.legend()
+    plt.title("Loss")
+    plt.xlabel("Epoch")
     plt.ylabel("Loss (MSE)")
     plt.legend()
-    plt.grid(True)
-    plt.savefig(f"audio_out/tx2m/20260210-1002_FT_100artists_Loss.png", dpi=300, bbox_inches='tight')
+    # filepath = f"{Config.TIMESTAMP}_{Config.UNL_METHOD}/{Config.TIMESTAMP}_{Config.UNL_METHOD}_LOSS"
+
+    folder_path = Path(f"audio_out/tx2m/{Config.TIMESTAMP}_{Config.UNL_METHOD}")
+    file_path = folder_path / f"{Config.TIMESTAMP}_{Config.UNL_METHOD}_LOSS.png"
+    folder_path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.show()
 
     return model
 
-def unl_gradient_ascent(model, forget_loader, retain_loader, epochs, lr, alpha=1, beta=1):
+def unl_gradient_ascent(model, forget_loader, retain_loader, epochs, lr, alpha, beta):
     device = next(model.parameters()).device
     model, optimizer = setup_lora(model, lr)
     autoencoder = load_vae(device)
@@ -156,6 +180,93 @@ def unl_gradient_ascent(model, forget_loader, retain_loader, epochs, lr, alpha=1
             count += 1
 
         print(f"Epoch {epoch + 1}/{epochs} | Retain Loss (Minimizing): {total_r / count:.4f} | Forget Loss (Maximizing): {total_f / count:.4f}")
+
+    return model
+
+
+import torch
+import torch.nn.functional as F
+import copy
+
+
+def unl_stochastic_teacher2(model, forget_loader, retain_loader, epochs, lr, alpha=1, beta=0.5):
+    device = next(model.parameters()).device
+
+    # 1. Configura LoRA sul modello originale (Mu)
+    model, optimizer = setup_lora(model, lr)
+    autoencoder = load_vae(device)
+
+    # 2. CREAZIONE DELLO STOCHASTIC TEACHER (Ms)
+    # Creiamo una copia del modello e resettiamo i parametri per renderlo "stocastico"
+    # Nota: Ms deve essere in modalità eval e senza gradienti
+    stochastic_teacher = copy.deepcopy(model).to('cpu')
+    #stochastic_teacher.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+    stochastic_teacher.eval()
+    for param in stochastic_teacher.parameters():
+        param.requires_grad = False
+
+    for epoch in range(epochs):
+        model.train()
+
+        # Prepariamo gli iteratori
+        forget_iter = iter(forget_loader)
+        retain_iter = iter(retain_loader)
+        num_batches = min(len(retain_loader), len(forget_loader))
+
+        for batch_idx in range(num_batches):
+            try:
+                f_waveforms, f_prompts = next(forget_iter)
+                r_waveforms, r_prompts = next(retain_iter)
+            except StopIteration:
+                break
+
+            optimizer.zero_grad()
+
+            # --- FASE 1: KNOWLEDGE ERASURE (Dati Forget) ---
+            f_waveforms = f_waveforms.to(device)
+            f_cond, f_latents = get_conditioning_and_latents(model, autoencoder, f_waveforms, f_prompts)
+            f_t = torch.rand(f_waveforms.shape[0], device=device)
+
+            # Output del modello che sta imparando (Student)
+            student_forget_preds = model(f_latents, t=f_t, cond=f_cond)
+
+            # Output dello Stochastic Teacher (Target casuale)
+            with torch.no_grad():
+                f_latents_cpu = f_latents.to('cpu')
+                f_t_cpu = f_t.to('cpu')
+
+                print(f"Teacher device: {next(stochastic_teacher.parameters()).device}")
+                print(f"Latents device: {f_latents_cpu.device}")
+                # Per il dizionario:
+                f_cond_cpu = to_device_recursive(f_cond, 'cpu') # <--- SOLUZIONE DEFINITIVA
+                #print(f"Latents device: {f_cond_cpu.device}")
+
+                #f_cond = f_cond.to('cpu') if isinstance(f_cond, torch.Tensor) else f_cond
+                stochastic_preds_cpu = stochastic_teacher(f_latents_cpu, t=f_t_cpu, cond=f_cond_cpu)
+                stochastic_preds = stochastic_preds_cpu.to(device)
+
+            forget_loss = F.mse_loss(student_forget_preds, stochastic_preds)
+
+
+            # --- FASE 2: MODEL RECONSTRUCTION (Dati Retain) ---
+            r_waveforms = r_waveforms.to(device)
+            r_cond, r_latents = get_conditioning_and_latents(model, autoencoder, r_waveforms, r_prompts)
+            r_t = torch.rand(r_waveforms.shape[0], device=device)
+
+            retain_preds = model(r_latents, t=r_t, cond=r_cond)
+
+            # Loss standard sui dati da mantenere (Eq. 5 semplificata)
+            retain_loss = F.mse_loss(retain_preds, r_latents)
+
+            # --- COMBINAZIONE ---
+            # beta guida l'oblio (stochasticity), alpha guida la conservazione
+            loss = alpha * retain_loss + beta * forget_loss
+
+            loss.backward()
+            optimizer.step()
+
+        print(
+            f"Epoch {epoch} | Retain Loss: {retain_loss.item():.4f} | Forget Loss (Stochastic): {forget_loss.item():.4f}")
 
     return model
 
@@ -213,8 +324,7 @@ def unl_stochastic_teacher(model, forget_loader, retain_loader, epochs, lr, alph
             loss.backward()
             optimizer.step()
 
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Retain Loss: {retain_loss.item():.4f} | Forget Loss: {forget_loss.item():.4f}")
+        print(f"Epoch{epoch} | Retain Loss: {retain_loss.item():.4f} | Forget Loss: {forget_loss.item():.4f}")
 
     return model
 

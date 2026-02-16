@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 import torch
 
 @dataclass
@@ -8,10 +9,11 @@ class Config:
     DEVICE = torch.device("cuda:0")# if torch.cuda.is_available() else "cpu")
 
     EPOCHS = 8
-    LR = 1e-4 #1e-3
-    NUM_ARTISTS = 100
+    LR = 5e-5
+    NUM_ARTISTS = 50
     # Unlearning
-    UNL_METHOD = "FT"   # FT, GA, ST, OSM, A
+    UNL_METHOD = "A"   # FT, GA, ST, OSM, A
+    TIMESTAMP = time.strftime("%Y%m%d-%H%M")
 
     AUDIO_DIR = "../data/fma_large"
     CSV_FILE = "../data/tracks.csv"
